@@ -64,21 +64,31 @@ client.on_message = on_message
 client.connect("broker.hivemq.com", 1883, 60)
 client.loop_start()  # run network loop in a background thread so plt can own the main thread
 
-# 3 stacked time-series plots on the left, V-I scatter plot spanning all rows on the right
-fig = plt.figure(figsize=(13, 7))
+# Left column: 3 time-series.  Right column: 3 cross-plots (V-I, C-Vibration, V-Vibration).
+fig = plt.figure(figsize=(13, 8))
 gs = fig.add_gridspec(3, 2, width_ratios=[2, 1.3])
 fig.suptitle("Live Sensor Readings — rdpms/point-machine")
 
 ax_v = fig.add_subplot(gs[0, 0])
 ax_c = fig.add_subplot(gs[1, 0], sharex=ax_v)
 ax_b = fig.add_subplot(gs[2, 0], sharex=ax_v)
-ax_vi = fig.add_subplot(gs[:, 1])
+
+ax_vi = fig.add_subplot(gs[0, 1])
+ax_cb = fig.add_subplot(gs[1, 1])
+ax_vb = fig.add_subplot(gs[2, 1])
 
 (line_v,) = ax_v.plot([], [], "b-o", markersize=3, label="Voltage")
 (line_c,) = ax_c.plot([], [], "r-o", markersize=3, label="Current")
 (line_b,) = ax_b.plot([], [], "g-o", markersize=3, label="Vibration")
-(line_vi,) = ax_vi.plot([], [], "m-o", markersize=4, label="V-I path")
-(point_vi,) = ax_vi.plot([], [], "ko", markersize=8, label="Latest")
+
+(line_vi,) = ax_vi.plot([], [], "m-o", markersize=3, label="V-I path")
+(point_vi,) = ax_vi.plot([], [], "ko", markersize=7, label="Latest")
+
+(line_cb,) = ax_cb.plot([], [], "c-o", markersize=3, label="C-Vibration path")
+(point_cb,) = ax_cb.plot([], [], "ko", markersize=7, label="Latest")
+
+(line_vb,) = ax_vb.plot([], [], "y-o", markersize=3, label="V-Vibration path")
+(point_vb,) = ax_vb.plot([], [], "ko", markersize=7, label="Latest")
 
 ax_v.set_ylabel("Voltage (V)")
 ax_c.set_ylabel("Current (A)")
@@ -89,15 +99,28 @@ ax_vi.set_xlabel("Voltage (V)")
 ax_vi.set_ylabel("Current (A)")
 ax_vi.set_title("Voltage vs Current")
 
-for ax in (ax_v, ax_c, ax_b, ax_vi):
+ax_cb.set_xlabel("Current (A)")
+ax_cb.set_ylabel("Vibration")
+ax_cb.set_title("Current vs Vibration")
+
+ax_vb.set_xlabel("Voltage (V)")
+ax_vb.set_ylabel("Vibration")
+ax_vb.set_title("Voltage vs Vibration")
+
+for ax in (ax_v, ax_c, ax_b, ax_vi, ax_cb, ax_vb):
     ax.grid(True)
-    ax.legend(loc="upper right")
+    ax.legend(loc="upper right", fontsize=8)
 
 
 def update(frame):
     with lock:
         if not times:
-            return line_v, line_c, line_b, line_vi, point_vi
+            return (
+                line_v, line_c, line_b,
+                line_vi, point_vi,
+                line_cb, point_cb,
+                line_vb, point_vb,
+            )
         x = list(times)
         v = list(voltages)
         c = list(currents)
@@ -106,15 +129,27 @@ def update(frame):
     line_v.set_data(x, v)
     line_c.set_data(x, c)
     line_b.set_data(x, b)
+
     line_vi.set_data(v, c)
     point_vi.set_data([v[-1]], [c[-1]])
 
-    for ax in (ax_v, ax_c, ax_b, ax_vi):
+    line_cb.set_data(c, b)
+    point_cb.set_data([c[-1]], [b[-1]])
+
+    line_vb.set_data(v, b)
+    point_vb.set_data([v[-1]], [b[-1]])
+
+    for ax in (ax_v, ax_c, ax_b, ax_vi, ax_cb, ax_vb):
         ax.relim()
         ax.autoscale_view()
 
     fig.autofmt_xdate()
-    return line_v, line_c, line_b, line_vi, point_vi
+    return (
+        line_v, line_c, line_b,
+        line_vi, point_vi,
+        line_cb, point_cb,
+        line_vb, point_vb,
+    )
 
 
 ani = FuncAnimation(fig, update, interval=500, cache_frame_data=False)
