@@ -64,19 +64,32 @@ client.on_message = on_message
 client.connect("broker.hivemq.com", 1883, 60)
 client.loop_start()  # run network loop in a background thread so plt can own the main thread
 
-fig, (ax_v, ax_c, ax_b) = plt.subplots(3, 1, sharex=True, figsize=(9, 7))
+# 3 stacked time-series plots on the left, V-I scatter plot spanning all rows on the right
+fig = plt.figure(figsize=(13, 7))
+gs = fig.add_gridspec(3, 2, width_ratios=[2, 1.3])
 fig.suptitle("Live Sensor Readings — rdpms/point-machine")
+
+ax_v = fig.add_subplot(gs[0, 0])
+ax_c = fig.add_subplot(gs[1, 0], sharex=ax_v)
+ax_b = fig.add_subplot(gs[2, 0], sharex=ax_v)
+ax_vi = fig.add_subplot(gs[:, 1])
 
 (line_v,) = ax_v.plot([], [], "b-o", markersize=3, label="Voltage")
 (line_c,) = ax_c.plot([], [], "r-o", markersize=3, label="Current")
 (line_b,) = ax_b.plot([], [], "g-o", markersize=3, label="Vibration")
+(line_vi,) = ax_vi.plot([], [], "m-o", markersize=4, label="V-I path")
+(point_vi,) = ax_vi.plot([], [], "ko", markersize=8, label="Latest")
 
 ax_v.set_ylabel("Voltage (V)")
 ax_c.set_ylabel("Current (A)")
 ax_b.set_ylabel("Vibration")
 ax_b.set_xlabel("Time")
 
-for ax in (ax_v, ax_c, ax_b):
+ax_vi.set_xlabel("Voltage (V)")
+ax_vi.set_ylabel("Current (A)")
+ax_vi.set_title("Voltage vs Current")
+
+for ax in (ax_v, ax_c, ax_b, ax_vi):
     ax.grid(True)
     ax.legend(loc="upper right")
 
@@ -84,7 +97,7 @@ for ax in (ax_v, ax_c, ax_b):
 def update(frame):
     with lock:
         if not times:
-            return line_v, line_c, line_b
+            return line_v, line_c, line_b, line_vi, point_vi
         x = list(times)
         v = list(voltages)
         c = list(currents)
@@ -93,13 +106,15 @@ def update(frame):
     line_v.set_data(x, v)
     line_c.set_data(x, c)
     line_b.set_data(x, b)
+    line_vi.set_data(v, c)
+    point_vi.set_data([v[-1]], [c[-1]])
 
-    for ax in (ax_v, ax_c, ax_b):
+    for ax in (ax_v, ax_c, ax_b, ax_vi):
         ax.relim()
         ax.autoscale_view()
 
     fig.autofmt_xdate()
-    return line_v, line_c, line_b
+    return line_v, line_c, line_b, line_vi, point_vi
 
 
 ani = FuncAnimation(fig, update, interval=500, cache_frame_data=False)
