@@ -15,7 +15,7 @@ import random
 import time
 from datetime import datetime
 
-from Lora_reciever import extract_json_messages
+from LoRa.Lora_reciever import extract_json_messages
 
 MAX_PACKETS = 32
 SENSOR_ID = "STM32_001"
