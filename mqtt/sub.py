@@ -1,3 +1,11 @@
+"""
+Live point-machine telemetry subscriber + dashboard.
+
+Decrypts the 15-parameter envelope produced by pub.py and renders a 3x3
+matplotlib dashboard with FRS-defined safety thresholds drawn as horizontal
+lines (orange = min_safe, red = min_fail; for TPT the line is max_safe).
+"""
+
 import paho.mqtt.client as mqtt
 import json
 import os
@@ -10,15 +18,23 @@ from matplotlib.animation import FuncAnimation
 
 KEY_FILE = "secret.key"
 DATA_FILE = "received_data.json"
-MAX_POINTS = 60  # show the last 60 readings on the graph
+MAX_POINTS = 300  # last ~60 s at 5 Hz
 
 with open(KEY_FILE, "rb") as f:
     cipher = Fernet(f.read())
 
+PARAMS = (
+    "vpt_nwkr", "vpt_rwkr",
+    "nwkr", "rwkr", "nwcr", "rwcr",
+    "vpt_110_n", "vpt_110_r",
+    "ipt_n", "ipt_r",
+    "vpt_24_n", "vpt_24_r",
+    "vib_x",
+    "tpt_n", "tpt_r",
+)
+
 times = deque(maxlen=MAX_POINTS)
-voltages = deque(maxlen=MAX_POINTS)
-currents = deque(maxlen=MAX_POINTS)
-vibrations = deque(maxlen=MAX_POINTS)
+buffers = {p: deque(maxlen=MAX_POINTS) for p in PARAMS}
 lock = threading.Lock()
 
 
@@ -51,9 +67,8 @@ def on_message(client, userdata, msg):
 
     with lock:
         times.append(datetime.fromtimestamp(data["timestamp"]))
-        voltages.append(data["voltage"])
-        currents.append(data["current"])
-        vibrations.append(data["vibration"])
+        for p in PARAMS:
+            buffers[p].append(data.get(p, 0))
 
     append_to_json(data)
 
@@ -62,100 +77,173 @@ client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
 client.on_connect = on_connect
 client.on_message = on_message
 client.connect("broker.hivemq.com", 1883, 60)
-client.loop_start()  # run network loop in a background thread so plt can own the main thread
-
-# Left column: 3 time-series.  Right column: 3 cross-plots (V-I, C-Vibration, V-Vibration).
-fig = plt.figure(figsize=(13, 8))
-gs = fig.add_gridspec(3, 2, width_ratios=[2, 1.3])
-fig.suptitle("Live Sensor Readings — rdpms/point-machine")
-
-ax_v = fig.add_subplot(gs[0, 0])
-ax_c = fig.add_subplot(gs[1, 0], sharex=ax_v)
-ax_b = fig.add_subplot(gs[2, 0], sharex=ax_v)
-
-ax_vi = fig.add_subplot(gs[0, 1])
-ax_cb = fig.add_subplot(gs[1, 1])
-ax_vb = fig.add_subplot(gs[2, 1])
-
-(line_v,) = ax_v.plot([], [], "b-o", markersize=3, label="Voltage")
-(line_c,) = ax_c.plot([], [], "r-o", markersize=3, label="Current")
-(line_b,) = ax_b.plot([], [], "g-o", markersize=3, label="Vibration")
-
-(line_vi,) = ax_vi.plot([], [], "m-o", markersize=3, label="V-I path")
-(point_vi,) = ax_vi.plot([], [], "ko", markersize=7, label="Latest")
-
-(line_cb,) = ax_cb.plot([], [], "c-o", markersize=3, label="C-Vibration path")
-(point_cb,) = ax_cb.plot([], [], "ko", markersize=7, label="Latest")
-
-(line_vb,) = ax_vb.plot([], [], "y-o", markersize=3, label="V-Vibration path")
-(point_vb,) = ax_vb.plot([], [], "ko", markersize=7, label="Latest")
-
-ax_v.set_ylabel("Voltage (V)")
-ax_c.set_ylabel("Current (A)")
-ax_b.set_ylabel("Vibration")
-ax_b.set_xlabel("Time")
-
-ax_vi.set_xlabel("Voltage (V)")
-ax_vi.set_ylabel("Current (A)")
-ax_vi.set_title("Voltage vs Current")
-
-ax_cb.set_xlabel("Current (A)")
-ax_cb.set_ylabel("Vibration")
-ax_cb.set_title("Current vs Vibration")
-
-ax_vb.set_xlabel("Voltage (V)")
-ax_vb.set_ylabel("Vibration")
-ax_vb.set_title("Voltage vs Vibration")
-
-for ax in (ax_v, ax_c, ax_b, ax_vi, ax_cb, ax_vb):
-    ax.grid(True)
-    ax.legend(loc="upper right", fontsize=8)
+client.loop_start()
 
 
-def update(frame):
+# ---- Dashboard ----
+fig = plt.figure(figsize=(15, 9))
+gs = fig.add_gridspec(3, 3)
+fig.suptitle("Point Machine Live Telemetry — RDPMS FRS Parameters")
+
+ax_v110     = fig.add_subplot(gs[0, 0])
+ax_ipt      = fig.add_subplot(gs[0, 1])
+ax_tpt      = fig.add_subplot(gs[0, 2])
+ax_vpt_rr   = fig.add_subplot(gs[1, 0])
+ax_vpt_loc  = fig.add_subplot(gs[1, 1])
+ax_vib      = fig.add_subplot(gs[1, 2])
+ax_pos_rly  = fig.add_subplot(gs[2, 0])
+ax_con_rly  = fig.add_subplot(gs[2, 1])
+ax_status   = fig.add_subplot(gs[2, 2])
+
+# 110 V at LOC — thresholds: min_safe=90, min_fail=82
+(line_110n,) = ax_v110.plot([], [], "b-",  lw=1.4, label="VPT 110 N")
+(line_110r,) = ax_v110.plot([], [], "b--", lw=1.4, label="VPT 110 R")
+ax_v110.axhline(90, color="orange", lw=1, ls=":", label="min_safe 90 V")
+ax_v110.axhline(82, color="red",    lw=1, ls=":", label="min_fail 82 V")
+ax_v110.set_ylabel("Volts")
+ax_v110.set_title("110 V DC at Location")
+ax_v110.set_ylim(70, 120)
+
+# Motor current
+(line_in,) = ax_ipt.plot([], [], "r-",  lw=1.4, label="IPT N")
+(line_ir,) = ax_ipt.plot([], [], "r--", lw=1.4, label="IPT R")
+ax_ipt.set_ylabel("Amps")
+ax_ipt.set_title("Motor Current (Stroke Signature)")
+ax_ipt.set_ylim(-0.5, 12)
+
+# TPT — max_safe=8 s
+(line_tn,) = ax_tpt.plot([], [], "g-",  lw=1.4, label="TPT N")
+(line_tr,) = ax_tpt.plot([], [], "g--", lw=1.4, label="TPT R")
+ax_tpt.axhline(8, color="red", lw=1, ls=":", label="max_safe 8 s")
+ax_tpt.set_ylabel("Seconds")
+ax_tpt.set_title("Operation Time (derived)")
+ax_tpt.set_ylim(0, 12)
+
+# 24 V at RR (NWKR/RWKR) — thresholds: min_safe=21, min_fail=18
+(line_nwkr_v,) = ax_vpt_rr.plot([], [], "m-",  lw=1.4, label="VPT NWKR")
+(line_rwkr_v,) = ax_vpt_rr.plot([], [], "m--", lw=1.4, label="VPT RWKR")
+ax_vpt_rr.axhline(21, color="orange", lw=1, ls=":", label="min_safe 21 V")
+ax_vpt_rr.axhline(18, color="red",    lw=1, ls=":", label="min_fail 18 V")
+ax_vpt_rr.set_ylabel("Volts")
+ax_vpt_rr.set_title("24 V at Relay Room (NWKR / RWKR)")
+ax_vpt_rr.set_ylim(-2, 28)
+
+# 24 V at LOC after detection — no FRS thresholds
+(line_24n,) = ax_vpt_loc.plot([], [], "c-",  lw=1.4, label="VPT 24 N (LOC)")
+(line_24r,) = ax_vpt_loc.plot([], [], "c--", lw=1.4, label="VPT 24 R (LOC)")
+ax_vpt_loc.set_ylabel("Volts")
+ax_vpt_loc.set_title("24 V at LOC after Detection")
+ax_vpt_loc.set_ylim(-2, 28)
+
+# Vibration
+(line_vib,) = ax_vib.plot([], [], "y-", lw=1.4, label="Vibration X")
+ax_vib.set_ylabel("Vib")
+ax_vib.set_title("Vibration X (optional)")
+ax_vib.set_ylim(-0.1, 1.0)
+
+# Position relays (NWKR / RWKR digital) — step plot
+(line_nwkr_d,) = ax_pos_rly.plot([], [], "b-",  drawstyle="steps-post", lw=1.6, label="NWKR")
+(line_rwkr_d,) = ax_pos_rly.plot([], [], "g-",  drawstyle="steps-post", lw=1.6, label="RWKR")
+ax_pos_rly.set_ylim(-0.2, 1.2)
+ax_pos_rly.set_yticks([0, 1])
+ax_pos_rly.set_title("Position Relays (NWKR / RWKR)")
+
+# Contactor relays (NWCR / RWCR digital)
+(line_nwcr_d,) = ax_con_rly.plot([], [], "r-",  drawstyle="steps-post", lw=1.6, label="NWCR")
+(line_rwcr_d,) = ax_con_rly.plot([], [], "m-",  drawstyle="steps-post", lw=1.6, label="RWCR")
+ax_con_rly.set_ylim(-0.2, 1.2)
+ax_con_rly.set_yticks([0, 1])
+ax_con_rly.set_title("Contactor Relays (NWCR / RWCR)")
+ax_con_rly.set_xlabel("Time")
+
+# Status panel — text only
+ax_status.axis("off")
+ax_status.set_title("Status")
+status_text = ax_status.text(0.02, 0.95, "", transform=ax_status.transAxes,
+                             family="monospace", fontsize=10, va="top")
+
+for ax in (ax_v110, ax_ipt, ax_tpt, ax_vpt_rr, ax_vpt_loc, ax_vib,
+           ax_pos_rly, ax_con_rly):
+    ax.grid(True, alpha=0.4)
+    ax.legend(loc="upper right", fontsize=7, ncol=2)
+
+
+def derive_state(latest):
+    if latest["nwcr"]:
+        return f"STROKING -> Normal (NWCR active)"
+    if latest["rwcr"]:
+        return f"STROKING -> Reverse (RWCR active)"
+    if latest["nwkr"]:
+        return "IDLE @ Normal (NWKR detected)"
+    if latest["rwkr"]:
+        return "IDLE @ Reverse (RWKR detected)"
+    return "UNKNOWN"
+
+
+def update(_frame):
     with lock:
         if not times:
-            return (
-                line_v, line_c, line_b,
-                line_vi, point_vi,
-                line_cb, point_cb,
-                line_vb, point_vb,
-            )
+            return ()
         x = list(times)
-        v = list(voltages)
-        c = list(currents)
-        b = list(vibrations)
+        snap = {p: list(buffers[p]) for p in PARAMS}
 
-    line_v.set_data(x, v)
-    line_c.set_data(x, c)
-    line_b.set_data(x, b)
+    line_110n.set_data(x, snap["vpt_110_n"])
+    line_110r.set_data(x, snap["vpt_110_r"])
 
-    line_vi.set_data(v, c)
-    point_vi.set_data([v[-1]], [c[-1]])
+    line_in.set_data(x, snap["ipt_n"])
+    line_ir.set_data(x, snap["ipt_r"])
 
-    line_cb.set_data(c, b)
-    point_cb.set_data([c[-1]], [b[-1]])
+    line_tn.set_data(x, snap["tpt_n"])
+    line_tr.set_data(x, snap["tpt_r"])
 
-    line_vb.set_data(v, b)
-    point_vb.set_data([v[-1]], [b[-1]])
+    line_nwkr_v.set_data(x, snap["vpt_nwkr"])
+    line_rwkr_v.set_data(x, snap["vpt_rwkr"])
 
-    for ax in (ax_v, ax_c, ax_b, ax_vi, ax_cb, ax_vb):
+    line_24n.set_data(x, snap["vpt_24_n"])
+    line_24r.set_data(x, snap["vpt_24_r"])
+
+    line_vib.set_data(x, snap["vib_x"])
+
+    line_nwkr_d.set_data(x, snap["nwkr"])
+    line_rwkr_d.set_data(x, snap["rwkr"])
+    line_nwcr_d.set_data(x, snap["nwcr"])
+    line_rwcr_d.set_data(x, snap["rwcr"])
+
+    for ax in (ax_v110, ax_ipt, ax_tpt, ax_vpt_rr, ax_vpt_loc, ax_vib,
+               ax_pos_rly, ax_con_rly):
         ax.relim()
-        ax.autoscale_view()
+        ax.autoscale_view(scalex=True, scaley=False)
+
+    latest = {p: snap[p][-1] for p in PARAMS}
+    text = (
+        f"State : {derive_state(latest)}\n"
+        f"\n"
+        f"NWKR={latest['nwkr']}   RWKR={latest['rwkr']}\n"
+        f"NWCR={latest['nwcr']}   RWCR={latest['rwcr']}\n"
+        f"\n"
+        f"V110_N = {latest['vpt_110_n']:6.2f} V    "
+        f"V110_R = {latest['vpt_110_r']:6.2f} V\n"
+        f"VPT_NWKR = {latest['vpt_nwkr']:6.2f} V  "
+        f"VPT_RWKR = {latest['vpt_rwkr']:6.2f} V\n"
+        f"VPT_24_N = {latest['vpt_24_n']:6.2f} V  "
+        f"VPT_24_R = {latest['vpt_24_r']:6.2f} V\n"
+        f"\n"
+        f"IPT_N = {latest['ipt_n']:6.2f} A    "
+        f"IPT_R = {latest['ipt_r']:6.2f} A\n"
+        f"TPT_N = {latest['tpt_n']:6.2f} s    "
+        f"TPT_R = {latest['tpt_r']:6.2f} s\n"
+        f"VIB_X = {latest['vib_x']:6.3f}"
+    )
+    status_text.set_text(text)
 
     fig.autofmt_xdate()
-    return (
-        line_v, line_c, line_b,
-        line_vi, point_vi,
-        line_cb, point_cb,
-        line_vb, point_vb,
-    )
+    return ()
 
 
 ani = FuncAnimation(fig, update, interval=500, cache_frame_data=False)
 
 try:
-    plt.tight_layout()
+    plt.tight_layout(rect=[0, 0, 1, 0.96])
     plt.show()
 finally:
     client.loop_stop()
