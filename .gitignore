@@ -1,3 +1,4 @@
 secret.key
 received_data.json
 .claude
+__pycache__/
