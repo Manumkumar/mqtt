@@ -2,11 +2,11 @@ import serial
 import time
 import re
 import json
-import os
 
-PORT     = "/dev/ttyUSB0"
-BAUDRATE = 9600
-DATA_FILE = "lora_received.json"
+PORT      = "/dev/ttyUSB0"
+BAUDRATE  = 9600
+DATA_FILE = "lora_received.jsonl"
+MAX_BUF   = 8192   # drop buffer if it grows past this without a complete JSON object
 
 ser = None  # opened in main()
 
@@ -19,16 +19,90 @@ def open_serial():
         timeout  = 1,
     )
 
+
+def reconnect(full_init=False):
+    """Close and reopen the serial port. By default just re-arms RX so we don't
+    flood the radio with AT echoes during transient USB stalls. Pass
+    full_init=True to also re-run AT+MODE/RFCFG (e.g. after a hard module reset)."""
+    global ser
+    try:
+        if ser is not None:
+            ser.close()
+    except Exception:
+        pass
+    while True:
+        try:
+            print("[SERIAL] reconnecting...")
+            time.sleep(1.0)
+            open_serial()
+            time.sleep(0.2)
+            if full_init:
+                send_at("AT")
+                send_at("AT+MODE=TEST")
+                send_at("AT+TEST=RFCFG,868,SF12,125,8,8,14,ON,OFF,OFF")
+            start_rx()
+            print("[SERIAL] reconnected and re-armed.")
+            return
+        except (serial.SerialException, OSError) as e:
+            print(f"[SERIAL] reconnect failed: {e}")
+
+
+def safe_write(data):
+    while True:
+        try:
+            ser.write(data)
+            return
+        except (serial.SerialException, OSError) as e:
+            print(f"[SERIAL] write error: {e}")
+            reconnect()
+
+
+_read_stall_count = 0
+_READ_STALL_LIMIT = 30  # consecutive transient stalls before forcing reconnect
+
+
+def safe_readline():
+    global _read_stall_count
+    try:
+        data = ser.readline()
+        _read_stall_count = 0
+        return data
+    except (serial.SerialException, OSError) as e:
+        msg = str(e)
+        # Transient USB stall: pyserial reports readiness but read returns 0.
+        # Module is fine; reconnecting just floods serial. Retry instead.
+        if "readiness to read but returned no data" in msg:
+            _read_stall_count += 1
+            if _read_stall_count < _READ_STALL_LIMIT:
+                time.sleep(0.1)
+                return b""
+            print(f"[SERIAL] {_read_stall_count} consecutive stalls — forcing reconnect")
+            _read_stall_count = 0
+        else:
+            print(f"[SERIAL] read error: {e}")
+        reconnect()
+        return b""
+
+
+def safe_in_waiting():
+    try:
+        return ser.in_waiting
+    except (serial.SerialException, OSError) as e:
+        print(f"[SERIAL] in_waiting error: {e}")
+        reconnect()
+        return 0
+
+
 # Lines from LoRa-E5 in test RX mode look like:  +TEST: RX "7B2271223A22"
 RX_LINE_RE = re.compile(r'\+TEST:\s*RX\s*"([0-9A-Fa-f]+)"')
 
 
-def send_at(command):
-    ser.write((command + "\r\n").encode())
-    time.sleep(0.3)
+def send_at(command, wait=0.3):
+    safe_write((command + "\r\n").encode())
+    time.sleep(wait)
     response = ""
-    while ser.in_waiting > 0:
-        response += ser.readline().decode("utf-8", errors="replace")
+    while safe_in_waiting() > 0:
+        response += safe_readline().decode("utf-8", errors="replace")
     return response.strip()
 
 
@@ -36,15 +110,15 @@ def setup_lora():
     print("Initializing LoRa-E5...")
     print(send_at("AT"))
     print(send_at("AT+MODE=TEST"))
-    # Must match the transmitter's RFCFG exactly: 433MHz, SF7, BW125, preamble 12, ...
-    print(send_at("AT+TEST=RFCFG,433,SF7,125,12,15,14,ON,OFF,OFF"))
+    # Must match the transmitter's RFCFG exactly: 868MHz, SF12, BW125, preamble 8, ...
+    print(send_at("AT+TEST=RFCFG,868,SF12,125,8,8,14,ON,OFF,OFF"))
     print("LoRa-E5 configured. Listening for packets...")
     print("-" * 60)
 
 
 def start_rx():
     # Single-packet receive mode — needs to be re-armed after each packet on LoRa-E5
-    ser.write(b"AT+TEST=RXLRPKT\r\n")
+    safe_write(b"AT+TEST=RXLRPKT\r\n")
     time.sleep(0.05)
 
 
@@ -97,24 +171,33 @@ def extract_json_messages(buf: bytes):
     return messages, text.encode("utf-8", errors="replace")
 
 
-def append_to_json(record):
-    records = []
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r") as f:
-            try:
-                records = json.load(f)
-            except json.JSONDecodeError:
-                records = []
-    records.append(record)
-    with open(DATA_FILE, "w") as f:
-        json.dump(records, f, indent=2)
+def append_to_jsonl(record):
+    with open(DATA_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, separators=(",", ":")) + "\n")
+
+
+def pretty_print_message(obj):
+    """Render a decoded sensor envelope in a human-readable form."""
+    seq    = obj.get("q", "?")
+    sensor = obj.get("s", "?")
+    name   = obj.get("n", "?")
+    points = obj.get("p", [])
+    print("  " + "-" * 56)
+    print(f"  Sensor : {sensor}    Metric : {name}    Seq : {seq}")
+    for p in points:
+        pid    = p.get("id", "?")
+        values = p.get("v", [])
+        ts     = p.get("t", "?")
+        vals   = ", ".join(str(v) for v in values)
+        print(f"    id={pid}  v=[{vals}]  t={ts}")
+    print("  " + "-" * 56)
 
 
 def listen():
     buf = b""
     start_rx()
     while True:
-        line = ser.readline().decode("utf-8", errors="replace").strip()
+        line = safe_readline().decode("utf-8", errors="replace").strip()
         if not line:
             continue
 
@@ -129,12 +212,18 @@ def listen():
                 continue
 
             buf += chunk
-            print(f"[CHUNK] +{len(chunk)}B  buf={len(buf)}B  hex={hex_part}")
+            ascii_preview = chunk.decode("ascii", errors="replace")
+            print(f"[CHUNK] +{len(chunk)}B  buf={len(buf)}B  hex={hex_part}  ascii={ascii_preview!r}")
 
             messages, buf = extract_json_messages(buf)
             for obj in messages:
-                print(f"[MSG]   {json.dumps(obj)}")
-                append_to_json(obj)
+                print("[MSG]   " + json.dumps(obj, separators=(",", ":")))
+                pretty_print_message(obj)
+                append_to_jsonl(obj)
+
+            if len(buf) > MAX_BUF:
+                print(f"[WARN] buf overflow ({len(buf)}B) — dropping")
+                buf = b""
 
             start_rx()  # re-arm for the next fragment
         elif line.startswith("+TEST:"):
@@ -152,7 +241,10 @@ def main():
     except KeyboardInterrupt:
         print("\nStopping receiver...")
     finally:
-        ser.close()
+        try:
+            ser.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

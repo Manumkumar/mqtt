@@ -8,7 +8,6 @@ lines (orange = min_safe, red = min_fail; for TPT the line is max_safe).
 
 import paho.mqtt.client as mqtt
 import json
-import os
 import threading
 from collections import deque
 from datetime import datetime
@@ -17,8 +16,10 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 
 KEY_FILE = "secret.key"
-DATA_FILE = "received_data.json"
-MAX_POINTS = 300  # last ~60 s at 5 Hz
+DATA_FILE = "received_data.jsonl"   # JSONL: one record per line, O(1) append
+MAX_POINTS = 300                    # last ~60 s at 5 Hz
+PLOT_INTERVAL_MS = 250              # GUI refresh period
+LOG_EVERY = 10                      # print 1 in N messages to keep stdout cheap
 
 with open(KEY_FILE, "rb") as f:
     cipher = Fernet(f.read())
@@ -35,20 +36,22 @@ PARAMS = (
 
 times = deque(maxlen=MAX_POINTS)
 buffers = {p: deque(maxlen=MAX_POINTS) for p in PARAMS}
+fault_buf = deque(maxlen=MAX_POINTS)
+label_buf = deque(maxlen=MAX_POINTS)
 lock = threading.Lock()
 
 
-def append_to_json(record):
-    records = []
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r") as f:
-            try:
-                records = json.load(f)
-            except json.JSONDecodeError:
-                records = []
-    records.append(record)
-    with open(DATA_FILE, "w") as f:
-        json.dump(records, f, indent=2)
+# Persistent append-only log. JSONL is O(1) per record vs. JSON array which
+# rewrites the whole file every message and stalls the callback after a few
+# thousand records.
+log_file = open(DATA_FILE, "a", buffering=1)  # line-buffered
+msg_counter = 0
+data_dirty = threading.Event()
+
+
+def append_to_jsonl(record):
+    log_file.write(json.dumps(record))
+    log_file.write("\n")
 
 
 def on_connect(client, userdata, flags, reason_code, properties):
@@ -57,20 +60,27 @@ def on_connect(client, userdata, flags, reason_code, properties):
 
 
 def on_message(client, userdata, msg):
+    global msg_counter
     try:
         data = json.loads(cipher.decrypt(msg.payload).decode())
     except Exception as e:
         print(f"Failed to decrypt/parse: {e}")
         return
 
-    print(f"Received: {data}")
+    msg_counter += 1
+    if msg_counter % LOG_EVERY == 0:
+        print(f"[{msg_counter}] {data.get('timestamp', 0):.1f} "
+              f"fault={data.get('fault', '') or '-'}")
 
     with lock:
         times.append(datetime.fromtimestamp(data["timestamp"]))
         for p in PARAMS:
             buffers[p].append(data.get(p, 0))
+        fault_buf.append(data.get("fault", ""))
+        label_buf.append(data.get("label", "NORMAL"))
+    data_dirty.set()
 
-    append_to_json(data)
+    append_to_jsonl(data)
 
 
 client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
@@ -180,12 +190,44 @@ def derive_state(latest):
     return "UNKNOWN"
 
 
+def threshold_alarms(latest):
+    """Return list of human-readable threshold breaches per FRS."""
+    alarms = []
+    if latest["vpt_110_n"] < 82:
+        alarms.append(f"VPT_110_N={latest['vpt_110_n']:.1f} < min_fail 82")
+    elif latest["vpt_110_n"] < 90:
+        alarms.append(f"VPT_110_N={latest['vpt_110_n']:.1f} < min_safe 90")
+    if latest["vpt_110_r"] < 82:
+        alarms.append(f"VPT_110_R={latest['vpt_110_r']:.1f} < min_fail 82")
+    elif latest["vpt_110_r"] < 90:
+        alarms.append(f"VPT_110_R={latest['vpt_110_r']:.1f} < min_safe 90")
+    # 24 V detection feeds — only meaningful when relay should be active
+    if latest["nwkr"] and latest["vpt_nwkr"] < 18:
+        alarms.append(f"VPT_NWKR={latest['vpt_nwkr']:.1f} < min_fail 18")
+    elif latest["nwkr"] and latest["vpt_nwkr"] < 21:
+        alarms.append(f"VPT_NWKR={latest['vpt_nwkr']:.1f} < min_safe 21")
+    if latest["rwkr"] and latest["vpt_rwkr"] < 18:
+        alarms.append(f"VPT_RWKR={latest['vpt_rwkr']:.1f} < min_fail 18")
+    elif latest["rwkr"] and latest["vpt_rwkr"] < 21:
+        alarms.append(f"VPT_RWKR={latest['vpt_rwkr']:.1f} < min_safe 21")
+    if latest["tpt_n"] > 8:
+        alarms.append(f"TPT_N={latest['tpt_n']:.1f} > max_safe 8 (obstruction)")
+    if latest["tpt_r"] > 8:
+        alarms.append(f"TPT_R={latest['tpt_r']:.1f} > max_safe 8 (obstruction)")
+    return alarms
+
+
 def update(_frame):
+    if not data_dirty.is_set():
+        return ()
     with lock:
         if not times:
             return ()
         x = list(times)
         snap = {p: list(buffers[p]) for p in PARAMS}
+        fault_now = fault_buf[-1] if fault_buf else ""
+        label_now = label_buf[-1] if label_buf else "NORMAL"
+        data_dirty.clear()
 
     line_110n.set_data(x, snap["vpt_110_n"])
     line_110r.set_data(x, snap["vpt_110_r"])
@@ -215,8 +257,13 @@ def update(_frame):
         ax.autoscale_view(scalex=True, scaley=False)
 
     latest = {p: snap[p][-1] for p in PARAMS}
+    alarms = threshold_alarms(latest)
+    fault_line = f"FAULT : {fault_now}" if fault_now else "FAULT : (none)"
+    alarm_block = ("\n  ! " + "\n  ! ".join(alarms)) if alarms else "  (none)"
     text = (
         f"State : {derive_state(latest)}\n"
+        f"LABEL : {label_now}\n"
+        f"{fault_line}\n"
         f"\n"
         f"NWKR={latest['nwkr']}   RWKR={latest['rwkr']}\n"
         f"NWCR={latest['nwcr']}   RWCR={latest['rwcr']}\n"
@@ -232,15 +279,24 @@ def update(_frame):
         f"IPT_R = {latest['ipt_r']:6.2f} A\n"
         f"TPT_N = {latest['tpt_n']:6.2f} s    "
         f"TPT_R = {latest['tpt_r']:6.2f} s\n"
-        f"VIB_X = {latest['vib_x']:6.3f}"
+        f"VIB_X = {latest['vib_x']:6.3f}\n"
+        f"\n"
+        f"ALARMS:{alarm_block}"
     )
+    if label_now == "FAULT":
+        color = "red"
+    elif label_now == "MAINTENANCE_ALERT":
+        color = "darkorange"
+    else:
+        color = "black"
     status_text.set_text(text)
+    status_text.set_color(color)
 
-    fig.autofmt_xdate()
     return ()
 
 
-ani = FuncAnimation(fig, update, interval=500, cache_frame_data=False)
+fig.autofmt_xdate()  # one-shot tick rotation; not in the redraw loop
+ani = FuncAnimation(fig, update, interval=PLOT_INTERVAL_MS, cache_frame_data=False)
 
 try:
     plt.tight_layout(rect=[0, 0, 1, 0.96])
@@ -248,3 +304,4 @@ try:
 finally:
     client.loop_stop()
     client.disconnect()
+    log_file.close()
