@@ -14,6 +14,7 @@ from datetime import datetime
 from cryptography.fernet import Fernet
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
+from scipy.signal import medfilt, savgol_filter
 
 KEY_FILE = "secret.key"
 DATA_FILE = "received_data.jsonl"   # JSONL: one record per line, O(1) append
@@ -70,7 +71,7 @@ def on_message(client, userdata, msg):
     msg_counter += 1
     if msg_counter % LOG_EVERY == 0:
         print(f"[{msg_counter}] {data.get('timestamp', 0):.1f} "
-              f"fault={data.get('fault', '') or '-'}")
+              f"fault={data.get('fI_N=0.01ault', '') or '-'}")
 
     with lock:
         times.append(datetime.fromtimestamp(data["timestamp"]))
@@ -176,6 +177,44 @@ for ax in (ax_v110, ax_ipt, ax_tpt, ax_vpt_rr, ax_vpt_loc, ax_vib,
            ax_pos_rly, ax_con_rly):
     ax.grid(True, alpha=0.4)
     ax.legend(loc="upper right", fontsize=7, ncol=2)
+
+
+# ---- Signal conditioning pipeline ----
+# Median (despike) -> Savitzky-Golay (smooth, preserve waveform) -> Kalman (optimal estimate).
+MEDIAN_KERNEL = 5
+SAVGOL_WINDOW = 11
+SAVGOL_POLY   = 2
+KALMAN_Q      = 1e-3   # process noise (small = trust prediction)
+KALMAN_R      = 0.5    # measurement noise
+
+
+def kalman_1d(seq, q=KALMAN_Q, r=KALMAN_R):
+    """Constant-value 1-D Kalman estimator."""
+    if not seq:
+        return []
+    x = seq[0]
+    p = 1.0
+    out = []
+    for z in seq:
+        p += q
+        k = p / (p + r)
+        x = x + k * (z - x)
+        p = (1.0 - k) * p
+        out.append(x)
+    return out
+
+
+def condition_signal(arr):
+    """Pipeline: median -> Savitzky-Golay -> Kalman. Returns list same length as input."""
+    if not arr:
+        return []
+    n = len(arr)
+    a = list(arr)
+    if n >= MEDIAN_KERNEL:
+        a = list(medfilt(a, kernel_size=MEDIAN_KERNEL))
+    if n >= SAVGOL_WINDOW:
+        a = list(savgol_filter(a, SAVGOL_WINDOW, SAVGOL_POLY))
+    return kalman_1d(a)
 
 
 def derive_state(latest):
@@ -297,6 +336,74 @@ def update(_frame):
 
 fig.autofmt_xdate()  # one-shot tick rotation; not in the redraw loop
 ani = FuncAnimation(fig, update, interval=PLOT_INTERVAL_MS, cache_frame_data=False)
+
+
+# ---- Second window: conditioned signals ----
+COND_PARAMS = (
+    ("vpt_110_n", "VPT 110 N",   "Volts"),
+    ("vpt_110_r", "VPT 110 R",   "Volts"),
+    ("vpt_nwkr",  "VPT NWKR",    "Volts"),
+    ("vpt_rwkr",  "VPT RWKR",    "Volts"),
+    ("ipt_n",     "IPT N",       "Amps"),
+    ("ipt_r",     "IPT R",       "Amps"),
+    ("vib_x",     "Vibration X", ""),
+)
+
+fig2 = plt.figure(figsize=(13, 9))
+fig2.suptitle("Conditioned Signals — Median → Savitzky-Golay → Kalman")
+gs2 = fig2.add_gridspec(4, 2)
+cond_axes = {}
+cond_lines_raw = {}
+cond_lines_clean = {}
+
+slots = [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1), (3, 0)]
+for (key, label, unit), (r, c) in zip(COND_PARAMS, slots):
+    ax = fig2.add_subplot(gs2[r, c])
+    (l_raw,)   = ax.plot([], [], color="gray",     lw=0.8, alpha=0.5, label="raw")
+    (l_clean,) = ax.plot([], [], color="tab:blue", lw=1.6,            label="conditioned")
+    ax.set_title(label)
+    if unit:
+        ax.set_ylabel(unit)
+    ax.grid(True, alpha=0.4)
+    ax.legend(loc="upper right", fontsize=8)
+    cond_axes[key] = ax
+    cond_lines_raw[key] = l_raw
+    cond_lines_clean[key] = l_clean
+
+ax_legend = fig2.add_subplot(gs2[3, 1])
+ax_legend.axis("off")
+ax_legend.text(0.02, 0.95,
+               "Pipeline:\n"
+               f"  1. Median filter   (kernel={MEDIAN_KERNEL})\n"
+               f"  2. Savitzky-Golay  (window={SAVGOL_WINDOW}, poly={SAVGOL_POLY})\n"
+               f"  3. Kalman 1-D      (q={KALMAN_Q}, r={KALMAN_R})",
+               transform=ax_legend.transAxes, family="monospace",
+               fontsize=10, va="top")
+
+
+def update_conditioned(_frame):
+    with lock:
+        if not times:
+            return ()
+        x = list(times)
+        snap = {key: list(buffers[key]) for key, _, _ in COND_PARAMS}
+
+    for key, _, _ in COND_PARAMS:
+        raw = snap[key]
+        clean = condition_signal(raw)
+        cond_lines_raw[key].set_data(x, raw)
+        cond_lines_clean[key].set_data(x, clean)
+        ax = cond_axes[key]
+        ax.relim()
+        ax.autoscale_view(scalex=True, scaley=True)
+
+    return ()
+
+
+fig2.autofmt_xdate()
+ani2 = FuncAnimation(fig2, update_conditioned, interval=PLOT_INTERVAL_MS,
+                     cache_frame_data=False)
+
 
 try:
     plt.tight_layout(rect=[0, 0, 1, 0.96])

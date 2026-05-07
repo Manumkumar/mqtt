@@ -3,12 +3,21 @@ import time
 import re
 import json
 
+import paho.mqtt.client as mqtt
+
 PORT      = "/dev/ttyUSB0"
 BAUDRATE  = 9600
 DATA_FILE = "lora_received.jsonl"
 MAX_BUF   = 8192   # drop buffer if it grows past this without a complete JSON object
 
-ser = None  # opened in main()
+MQTT_HOST  = "relldevices.in"
+MQTT_PORT  = 1883
+MQTT_USER  = "mosquitto"
+MQTT_PASS  = "dIju32432saafgsd"
+MQTT_TOPIC = "parameter_e/stngw_001/01"
+
+ser    = None  # opened in main()
+client = None  # MQTT client, set in main()
 
 
 def open_serial():
@@ -176,6 +185,29 @@ def append_to_jsonl(record):
         f.write(json.dumps(record, separators=(",", ":")) + "\n")
 
 
+def setup_mqtt():
+    global client
+    # Support both paho-mqtt 1.x and 2.x. CallbackAPIVersion only exists on 2.x.
+    if hasattr(mqtt, "CallbackAPIVersion"):
+        client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        client.on_connect    = lambda c, u, f, rc, p: print(f"[MQTT]  connected rc={rc}")
+        client.on_disconnect = lambda c, u, f, rc, p: print(f"[MQTT]  disconnected rc={rc}")
+    else:
+        client = mqtt.Client()
+        client.on_connect    = lambda c, u, f, rc: print(f"[MQTT]  connected rc={rc}")
+        client.on_disconnect = lambda c, u, rc:    print(f"[MQTT]  disconnected rc={rc}")
+    client.username_pw_set(MQTT_USER, MQTT_PASS)
+    client.connect(MQTT_HOST, MQTT_PORT, keepalive=60)
+    client.loop_start()
+
+
+def publish_to_mqtt(record):
+    payload = json.dumps(record, separators=(",", ":"))
+    info = client.publish(MQTT_TOPIC, payload, qos=1, retain=True)
+    info.wait_for_publish(timeout=5.0)
+    print(f"[MQTT]  pub topic={MQTT_TOPIC} mid={info.mid} rc={info.rc} sent={info.is_published()}")
+
+
 def pretty_print_message(obj):
     """Render a decoded sensor envelope in a human-readable form."""
     seq    = obj.get("q", "?")
@@ -217,9 +249,15 @@ def listen():
 
             messages, buf = extract_json_messages(buf)
             for obj in messages:
+                # Reject inner-point fragments that escape from a corrupted envelope —
+                # only the full {q, s, n, p} envelope is a real message.
+                if not all(k in obj for k in ("q", "s", "n", "p")):
+                    print(f"[SKIP]  fragment (no envelope keys): {json.dumps(obj, separators=(',', ':'))}")
+                    continue
                 print("[MSG]   " + json.dumps(obj, separators=(",", ":")))
                 pretty_print_message(obj)
                 append_to_jsonl(obj)
+                publish_to_mqtt(obj)
 
             if len(buf) > MAX_BUF:
                 print(f"[WARN] buf overflow ({len(buf)}B) — dropping")
@@ -234,6 +272,7 @@ def listen():
 
 
 def main():
+    setup_mqtt()
     open_serial()
     setup_lora()
     try:
@@ -243,6 +282,11 @@ def main():
     finally:
         try:
             ser.close()
+        except Exception:
+            pass
+        try:
+            client.loop_stop()
+            client.disconnect()
         except Exception:
             pass
 
