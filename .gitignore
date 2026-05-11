@@ -2,3 +2,5 @@ secret.key
 received_data.json
 .claude
 __pycache__/
+received_data.jsonl
+filtered_value.json
