@@ -63,7 +63,9 @@ class TimeFeatureDetector:
         rwkr = int(record.get("rwkr", 0) or 0)
 
         if event is None:
-            # Rising contactor → mark stroke start
+            # Rising contactor → mark stroke start. If both nwcr and rwcr
+            # rise on the same sample, N takes priority (firmware emits one
+            # contactor at a time in normal operation).
             if nwcr == 1 and self.prev_nwcr == 0:
                 self.stroke_start_ts = ts
                 self.stroke_side = "N"

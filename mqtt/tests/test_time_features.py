@@ -88,3 +88,16 @@ def test_relay_edge_fallback_opposite_relay_discards_stroke():
     assert event is not None
     assert event["side"] == "N"
     assert abs(event["op_time"] - 2.0) < 1e-6
+
+
+def test_relay_edge_fallback_stroke_r_side():
+    """Mirror of test_relay_edge_fallback_stroke for the R side."""
+    det = TimeFeatureDetector()
+    assert det.update(_record(ts=2000.0)) is None
+    assert det.update(_record(ts=2000.2, rwcr=1)) is None
+    assert det.update(_record(ts=2003.5, rwcr=1)) is None
+    event = det.update(_record(ts=2004.0, rwcr=1, rwkr=1))
+    assert event is not None
+    assert event["side"] == "R"
+    assert abs(event["op_time"] - 3.8) < 1e-6
+    assert event["slipping"] is False
