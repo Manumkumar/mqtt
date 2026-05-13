@@ -31,3 +31,12 @@ def test_normal_stroke_via_tpt_n():
     assert event["slipping"] is False
     assert event["stroke_count"] == 1
     assert event["slip_count"] == 0
+
+
+def test_slipping_stroke_via_tpt_n():
+    det = TimeFeatureDetector()
+    assert det.update(_record(ts=1000.0)) is None
+    event = det.update(_record(ts=1001.0, tpt_n=9.5))
+    assert event["slipping"] is True
+    assert event["slip_count"] == 1
+    assert event["stroke_count"] == 1
