@@ -34,6 +34,12 @@ class TimeFeatureDetector:
         if ts == 0:
             return None
 
+        # ---- out-of-order timestamp guard ----
+        if self.stroke_start_ts is not None and ts < self.stroke_start_ts:
+            self.stroke_start_ts = None
+            self.stroke_side = None
+            return None
+
         # ---- vdrop accumulation per rail ----
         for rail, threshold in VDROP_THRESHOLDS.items():
             value = record.get(rail, 0) or 0

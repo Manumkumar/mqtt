@@ -101,3 +101,33 @@ def test_relay_edge_fallback_stroke_r_side():
     assert event["side"] == "R"
     assert abs(event["op_time"] - 3.8) < 1e-6
     assert event["slipping"] is False
+
+
+def test_out_of_order_timestamp_discards_in_flight_stroke():
+    det = TimeFeatureDetector()
+    det.update(_record(ts=1000.0))
+    det.update(_record(ts=1000.5, nwcr=1))   # start in flight
+    # Record arrives with ts < stroke_start_ts → discard, no event
+    event = det.update(_record(ts=999.0, nwcr=1))
+    assert event is None
+    # Detector still functional on next valid sample
+    det.update(_record(ts=1001.0, nwcr=0))   # reset prev_nwcr
+    det.update(_record(ts=1002.0, nwcr=1))   # fresh edge
+    event = det.update(_record(ts=1004.0, nwcr=1, nwkr=1))
+    assert event is not None
+    assert event["side"] == "N"
+    assert abs(event["op_time"] - 2.0) < 1e-6
+
+
+def test_missing_or_zero_timestamp_skips_emission():
+    det = TimeFeatureDetector()
+    det.update(_record(ts=1000.0))
+    # ts == 0 → return None, no state change
+    assert det.update(_record(ts=0.0, tpt_n=5.0)) is None
+    # Missing key entirely → also None
+    rec = _record(ts=1001.0, tpt_n=5.0)
+    rec.pop("timestamp")
+    assert det.update(rec) is None
+    # Counters unchanged
+    snap = det.snapshot_counters()
+    assert snap["stroke_count"] == 0
