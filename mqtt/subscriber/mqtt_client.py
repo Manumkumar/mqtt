@@ -15,6 +15,7 @@ from common.encryption import get_cipher
 from subscriber.config import PARAMS, FILTERED_PARAMS, LOG_EVERY
 from subscriber.data_store import DataStore
 from subscriber.data_logging import DataLogger
+from subscriber.time_features import TimeFeatureDetector
 
 
 def create_client(data_store: DataStore, data_logger: DataLogger) -> mqtt.Client:
@@ -24,6 +25,7 @@ def create_client(data_store: DataStore, data_logger: DataLogger) -> mqtt.Client
     """
     cipher = get_cipher()
     msg_counter = {"n": 0}  # mutable container for closure
+    detector = TimeFeatureDetector()
 
     def on_connect(_client, _userdata, _flags, reason_code, _properties):
         print("Connected! Code:", reason_code)
@@ -50,6 +52,24 @@ def create_client(data_store: DataStore, data_logger: DataLogger) -> mqtt.Client
             data_store.fault_buf.append(data.get("fault", ""))
             data_store.label_buf.append(data.get("label", "NORMAL"))
         data_store.data_dirty.set()
+
+        # Time-feature detection (runs every sample; emits event on stroke completion)
+        try:
+            event = detector.update(data)
+        except Exception as e:
+            print(f"[time-features] detector error: {e}")
+            event = None
+
+        with data_store.lock:
+            if event is not None:
+                data_store.event_buf.append(event)
+                data_store.counters = detector.snapshot_counters()
+            else:
+                # Keep counters fresh for vdrop accumulators
+                data_store.counters = detector.snapshot_counters()
+
+        if event is not None:
+            data_logger.append_event(event)
 
         # Logging
         data_logger.append_raw(data)
