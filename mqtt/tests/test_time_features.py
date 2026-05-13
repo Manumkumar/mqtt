@@ -133,3 +133,17 @@ def test_missing_or_zero_timestamp_skips_emission():
     # Counters unchanged
     snap = det.snapshot_counters()
     assert snap["stroke_count"] == 0
+
+
+def test_snapshot_counters_after_multiple_strokes():
+    det = TimeFeatureDetector()
+    det.update(_record(ts=1000.0))
+    det.update(_record(ts=1001.0, tpt_n=4.0))   # normal
+    det.update(_record(ts=1010.0, tpt_n=0.0))   # tpt resets
+    det.update(_record(ts=1011.0, tpt_r=9.5))   # slipping R
+    det.update(_record(ts=1020.0, tpt_r=0.0))
+    det.update(_record(ts=1021.0, tpt_n=6.0))   # normal again
+    snap = det.snapshot_counters()
+    assert snap["stroke_count"] == 3
+    assert snap["slip_count"] == 1
+    assert snap["last_op_time"] == 6.0
