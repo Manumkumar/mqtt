@@ -40,3 +40,16 @@ def test_slipping_stroke_via_tpt_n():
     assert event["slipping"] is True
     assert event["slip_count"] == 1
     assert event["stroke_count"] == 1
+
+
+def test_vdrop_accumulation_on_vpt_110_n():
+    det = TimeFeatureDetector()
+    # Below-threshold dip starts at ts=1000.0
+    for i in range(5):
+        det.update(_record(ts=1000.0 + i * 0.2, vpt_110_n=85.0))
+    # Recovery at ts=1001.0 → closes the interval (1001.0 - 1000.0 = 1.0 s)
+    det.update(_record(ts=1001.0, vpt_110_n=110.0))
+    snap = det.snapshot_counters()
+    assert abs(snap["vdrop_seconds"]["vpt_110_n"] - 1.0) < 1e-6
+    # Other rails untouched
+    assert snap["vdrop_seconds"]["vpt_110_r"] == 0.0

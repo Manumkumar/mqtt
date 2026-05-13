@@ -34,6 +34,17 @@ class TimeFeatureDetector:
         if ts == 0:
             return None
 
+        # ---- vdrop accumulation per rail ----
+        for rail, threshold in VDROP_THRESHOLDS.items():
+            value = record.get(rail, 0) or 0
+            below = value < threshold
+            start = self.vdrop_start[rail]
+            if below and start is None:
+                self.vdrop_start[rail] = ts
+            elif not below and start is not None:
+                self.counters["vdrop_seconds"][rail] += ts - start
+                self.vdrop_start[rail] = None
+
         # ---- tpt-based stroke detection ----
         tpt_n = record.get("tpt_n", 0) or 0
         tpt_r = record.get("tpt_r", 0) or 0
