@@ -6,7 +6,7 @@ Uses line-buffered append-only files: O(1) per record, no full-file rewrites.
 
 import json
 
-from subscriber.config import DATA_FILE, FILTERED_FILE, FILTERED_PARAMS
+from subscriber.config import DATA_FILE, FILTERED_FILE, FILTERED_PARAMS, EVENT_FILE
 from subscriber.signal_conditioning import condition_signal
 
 
@@ -16,6 +16,7 @@ class DataLogger:
     def __init__(self):
         self._raw_file = open(DATA_FILE, "a", buffering=1)
         self._filtered_file = open(FILTERED_FILE, "a", buffering=1)
+        self._event_file = open(EVENT_FILE, "a", buffering=1)
 
     def append_raw(self, record: dict) -> None:
         """Write one raw telemetry record."""
@@ -38,7 +39,17 @@ class DataLogger:
         self._filtered_file.write(json.dumps(record))
         self._filtered_file.write("\n")
 
+    def append_event(self, event: dict) -> None:
+        """Write one per-stroke time-feature event."""
+        try:
+            self._event_file.write(json.dumps(event, separators=(",", ":")))
+            self._event_file.write("\n")
+        except OSError as e:
+            import sys
+            print(f"[event-log] write error: {e}", file=sys.stderr)
+
     def close(self) -> None:
-        """Flush and close both log files."""
+        """Flush and close all log files."""
         self._raw_file.close()
         self._filtered_file.close()
+        self._event_file.close()
