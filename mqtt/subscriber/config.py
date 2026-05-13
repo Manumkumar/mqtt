@@ -36,3 +36,20 @@ FILTERED_PARAMS = (
     "vib_x",
     "tpt_n", "tpt_r",
 )
+
+# ---- Time-features ----
+EVENT_FILE = "time_features.jsonl"   # per-stroke event log
+MAX_EVENTS = 200                     # rolling event buffer for dashboard
+
+MAX_SAFE_TPT = 8.0                   # seconds; stroke slip threshold
+
+# rail name → min_safe voltage (drop below this counts as a drop)
+VDROP_THRESHOLDS = {
+    "vpt_110_n": 90.0,
+    "vpt_110_r": 90.0,
+    "vpt_nwkr":  21.0,
+    "vpt_rwkr":  21.0,
+    "vpt_24_n":  21.0,
+    "vpt_24_r":  21.0,
+}
+VDROP_RAILS = tuple(VDROP_THRESHOLDS.keys())
