@@ -14,6 +14,7 @@ from subscriber.dashboard import create_raw_dashboard
 from subscriber.conditioned_dashboard import create_conditioned_dashboard
 from subscriber.features_dashboard import create_features_dashboard
 from subscriber.correlation_dashboard import create_correlation_dashboard
+from subscriber.time_features_dashboard import create_time_features_dashboard
 from subscriber.control_panel import create_control_panel
 
 
@@ -28,6 +29,7 @@ def run() -> None:
     fig2, ani2 = create_conditioned_dashboard(data_store)
     fig3, ani3 = create_features_dashboard(data_store)
     fig4, ani4 = create_correlation_dashboard(data_store)
+    fig5, ani5 = create_time_features_dashboard(data_store)
 
     # Control panel to toggle dashboard visibility
     dashboards = {
@@ -35,6 +37,7 @@ def run() -> None:
         "Conditioned Signals":  (fig2, ani2),
         "Time-Domain Features": (fig3, ani3),
         "V-I-Vib Correlations": (fig4, ani4),
+        "System Time Features": (fig5, ani5),
     }
     _ctrl_fig, _ctrl_check = create_control_panel(dashboards)
 
