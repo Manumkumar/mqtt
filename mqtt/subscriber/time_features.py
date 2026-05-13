@@ -56,6 +56,48 @@ class TimeFeatureDetector:
         self.prev_tpt_n = tpt_n
         self.prev_tpt_r = tpt_r
 
+        # ---- relay-edge fallback (only if no tpt event this sample) ----
+        nwcr = int(record.get("nwcr", 0) or 0)
+        rwcr = int(record.get("rwcr", 0) or 0)
+        nwkr = int(record.get("nwkr", 0) or 0)
+        rwkr = int(record.get("rwkr", 0) or 0)
+
+        if event is None:
+            # Rising contactor → mark stroke start
+            if nwcr == 1 and self.prev_nwcr == 0:
+                self.stroke_start_ts = ts
+                self.stroke_side = "N"
+            elif rwcr == 1 and self.prev_rwcr == 0:
+                self.stroke_start_ts = ts
+                self.stroke_side = "R"
+
+            # Rising position relay → close stroke (matching side) or discard (opposite)
+            if self.stroke_start_ts is not None:
+                if self.stroke_side == "N":
+                    if nwkr == 1 and self.prev_nwkr == 0:
+                        op_time = ts - self.stroke_start_ts
+                        event = self._build_event(ts, "N", op_time)
+                        self.stroke_start_ts = None
+                        self.stroke_side = None
+                    elif rwkr == 1 and self.prev_rwkr == 0:
+                        # Wrong side — discard
+                        self.stroke_start_ts = None
+                        self.stroke_side = None
+                elif self.stroke_side == "R":
+                    if rwkr == 1 and self.prev_rwkr == 0:
+                        op_time = ts - self.stroke_start_ts
+                        event = self._build_event(ts, "R", op_time)
+                        self.stroke_start_ts = None
+                        self.stroke_side = None
+                    elif nwkr == 1 and self.prev_nwkr == 0:
+                        self.stroke_start_ts = None
+                        self.stroke_side = None
+
+        self.prev_nwcr = nwcr
+        self.prev_rwcr = rwcr
+        self.prev_nwkr = nwkr
+        self.prev_rwkr = rwkr
+
         return event
 
     def _build_event(self, ts: float, side: str, op_time: float) -> dict:
