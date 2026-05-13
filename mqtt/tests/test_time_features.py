@@ -106,13 +106,15 @@ def test_relay_edge_fallback_stroke_r_side():
 def test_out_of_order_timestamp_discards_in_flight_stroke():
     det = TimeFeatureDetector()
     det.update(_record(ts=1000.0))
-    det.update(_record(ts=1000.5, nwcr=1))   # start in flight
-    # Record arrives with ts < stroke_start_ts → discard, no event
-    event = det.update(_record(ts=999.0, nwcr=1))
+    det.update(_record(ts=1000.5, nwcr=1))   # stroke in flight
+    # OOO record with nwkr rising would close the stroke at op_time=-1.5
+    # if the guard were absent. With the guard, it's discarded and the
+    # in-flight stroke is cleared.
+    event = det.update(_record(ts=999.0, nwcr=1, nwkr=1))
     assert event is None
-    # Detector still functional on next valid sample
-    det.update(_record(ts=1001.0, nwcr=0))   # reset prev_nwcr
-    det.update(_record(ts=1002.0, nwcr=1))   # fresh edge
+    # Detector still functional: fresh stroke completes correctly
+    det.update(_record(ts=1001.0, nwcr=0, nwkr=0))   # reset prev_*
+    det.update(_record(ts=1002.0, nwcr=1))           # fresh start
     event = det.update(_record(ts=1004.0, nwcr=1, nwkr=1))
     assert event is not None
     assert event["side"] == "N"
